@@ -11,8 +11,9 @@ data class GroqCtx(
     val model: String,
     val messages: List<Message>,
     val tools: Collection<Tool> = emptyList(),
-    val maxCompletionTokens: Int = 4096,
-    val toolChoice: String = "auto",
+    val maxCompletionTokens: Int,
+    val toolChoice: String,
+    val stream: Boolean
 ) {
     @Serializable
     data class Tool(val type: String, val function: Function) {

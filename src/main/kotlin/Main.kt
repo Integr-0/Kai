@@ -1,7 +1,9 @@
 package net.integr
 
+import net.integr.kai.driver.impl.groq.GroqCtx
 import net.integr.kai.driver.impl.groq.GroqDriver
 import net.integr.kai.driver.impl.groq.GroqModel
+import net.integr.kai.output.OutputBundler
 import net.integr.kai.tool.ParamTypes
 import net.integr.kai.tool.ToolLinker
 import net.integr.kai.tool.annotations.Param
@@ -21,11 +23,34 @@ fun main() {
         .build()
 
     var currentQuery: String
-    while (true) {
-        currentQuery = readLine() ?: break
-        ai.query(currentQuery)
+
+    val outBundler = object : OutputBundler {
+        override fun onOutput(part: String) {
+            print(part)
+        }
+
+        override fun onError(message: String) {
+            error("[ERROR]: $message")
+        }
+
+        override fun onToolCall(toolCall: GroqCtx.Message.ToolCall) {
+            println("[TOOL CALL]: Id ${toolCall.id} on ${toolCall.function.name} with params: ${toolCall.function.arguments}")
+        }
+
+        override fun onToolCallResponse(toolCall: GroqCtx.Message.ToolCall, message: String) {
+            println("[TOOL RESPONSE]: Id ${toolCall.id} on ${toolCall.function.name} returned: $message")
+        }
+
+        override fun onToolCallError(toolCall: GroqCtx.Message.ToolCall, message: String) {
+            error("[TOOL ERROR]: $message")
+        }
     }
 
+    while (true) {
+        print("[QUERY]: ")
+        currentQuery = readLine() ?: break
+        ai.query(currentQuery, outBundler)
+    }
 }
 
 @Tool("get_weather", "Get the general current weather for a location, returns the temperature")

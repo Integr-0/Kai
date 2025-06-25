@@ -3,11 +3,15 @@ package net.integr.kai.driver.impl.groq
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import net.integr.kai.driver.ModelDriver
 import net.integr.kai.json.JsonHolder
+import net.integr.kai.output.OutputBundler
 import net.integr.kai.tool.ParamTypes
 import net.integr.kai.tool.data.IntermediateTool
+import java.io.BufferedReader
+import java.io.InputStreamReader
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
@@ -72,12 +76,13 @@ class GroqDriver(val model: GroqModel, val toolChoice: String, val maxCompletion
         }
     }
 
-    private fun send(provideTools: Boolean = true) {
+    private fun send(output: OutputBundler, provideTools: Boolean = true) {
         val builtReq = GroqCtx(model.modelName,
             messages = messages,
             tools = if (provideTools) tools.values else emptyList(),
             toolChoice = toolChoice,
-            maxCompletionTokens = maxCompletionTokens
+            maxCompletionTokens = maxCompletionTokens,
+            stream = true
         )
 
         val json = builtReq.toJson()
@@ -88,53 +93,95 @@ class GroqDriver(val model: GroqModel, val toolChoice: String, val maxCompletion
             .POST(HttpRequest.BodyPublishers.ofString(json))
             .build()
 
-        val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString())
-        handleResponse(response.body())
+        val response = httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream())
+        val reader = BufferedReader(InputStreamReader(response.body()))
+        handleStreamResponse(reader, output)
     }
 
-    private fun handleResponse(response: String) {
-        val json = JsonHolder.JSON.decodeFromString<JsonObject>(response)
-        val choices = json["choices"]?.jsonArray ?: return
-        val firstChoice = choices.firstOrNull() ?: return
+    private fun handleStreamResponse(reader: BufferedReader, output: OutputBundler) {
+        var role: String? = null
+        var finishedMessageContent: String? = ""
+        var finishReason: String? = null
+        val toolCallsResponses: MutableMap<GroqCtx.Message.ToolCall, GroqCtx.Message> = mutableMapOf()
 
-        val responseObject = JsonHolder.JSON.decodeFromJsonElement<GroqResponse>(firstChoice)
-        if (responseObject.message.role != "assistant") throw IllegalStateException("Expected assistant response, got: ${responseObject.message.role}")
+        for (line in reader.lines()) {
+            if (line.startsWith("data: ")) {
+                val data = line.removePrefix("data: ").trim()
+                if (data == "[DONE]") {
+                    break
+                }
 
-        messages.add(responseObject.message)
+                try {
+                    val json = JsonHolder.JSON.decodeFromString<JsonObject>(data)
+                    val choices = json["choices"]?.jsonArray ?: continue
+                    val delta = choices[0].jsonObject["delta"]
 
-        if (responseObject.message.toolCalls == null || responseObject.finishReason == "stop") {
-            println("[Response]: ${responseObject.message.content}")
+                    val toolCallsRead = delta?.jsonObject["tool_calls"]?.jsonArray
+                    val finishReasonRead = choices[0].jsonObject["finish_reason"]?.jsonPrimitive?.content
+                    val contentRead = delta?.jsonObject["content"]?.jsonPrimitive?.content
+                    val roleRead = delta?.jsonObject["role"]?.jsonPrimitive?.content
+
+                    if (roleRead != null) role = roleRead
+                    if (contentRead != null && contentRead != "null") {
+                        finishedMessageContent += contentRead
+                        output.onOutput(contentRead)
+                    }
+
+                    if (finishReasonRead != null) finishReason = finishReasonRead
+
+                    toolCallsRead?.forEach { toolCallElement ->
+                        val toolCall = JsonHolder.JSON.decodeFromJsonElement<GroqCtx.Message.ToolCall>(toolCallElement)
+
+                        val toolName = toolCall.function.name
+                        val tool = determineToolCall(toolName) ?: throw IllegalStateException("Tool $toolName not found")
+
+                        val params = toolCall.function.arguments
+                        val paramMap = JsonHolder.JSON.decodeFromString<JsonObject>(params)
+                        val toolCallId = toolCall.id
+
+                        output.onToolCall(toolCall)
+
+                        val parsedParams = paramMap.mapValues { (key, value) ->
+                            if (key !in tool.parameters) throw IllegalArgumentException("Parameter $key not found in tool ${tool.name}")
+
+                            val paramType = tool.parameters[key]!!.type
+                            if (!ParamTypes.isValidType(paramType)) throw IllegalArgumentException("Invalid type $paramType for parameter $key in tool ${tool.name}")
+
+                            ParamTypes.parsePrimitive(value.jsonPrimitive, paramType)
+                        }
+
+                        val toolResponse = tool.invoke(parsedParams.values.toTypedArray())
+                        if (toolResponse != null) {
+                            toolCallsResponses[toolCall] = GroqCtx.Message(role = "tool", content = "$toolResponse", toolCallId = toolCallId, name = toolName)
+                            output.onToolCallResponse(toolCall, toolResponse.toString())
+                        } else output.onToolCallError(toolCall,"Tool returned null response.")
+                    }
+
+                    if (role != "assistant") throw IllegalStateException("Expected assistant response, got: $role")
+
+                } catch (e: Exception) {
+                    error("\n[Error parsing chunk] ${e.message}")
+                }
+            }
+        }
+
+        val newAssistantMessage = GroqCtx.Message(
+            role = role ?: "assistant",
+            content = finishedMessageContent ?: "",
+            toolCalls = toolCallsResponses.keys.toMutableList(),
+        )
+
+        messages.add(newAssistantMessage)
+
+        if (finishReason == "stop") {
+            println()
             return
         }
 
-        responseObject.message.toolCalls.forEach { toolCall ->
-            val toolName = toolCall.function.name
-            val tool = determineToolCall(toolName) ?: throw IllegalStateException("Tool $toolName not found")
+        if (finishReason == "tool_calls") {
+            messages.addAll(toolCallsResponses.values)
 
-            val params = toolCall.function.arguments
-            val paramMap = JsonHolder.JSON.decodeFromString<JsonObject>(params)
-            val toolCallId = toolCall.id
-
-            println("[Tool call ($toolCallId)]: $toolName with params: $paramMap")
-
-            val parsedParams = paramMap.mapValues { (key, value) ->
-                if (key !in tool.parameters) throw IllegalArgumentException("Parameter $key not found in tool ${tool.name}")
-
-                val paramType = tool.parameters[key]!!.type
-                if (!ParamTypes.isValidType(paramType)) throw IllegalArgumentException("Invalid type $paramType for parameter $key in tool ${tool.name}")
-
-                ParamTypes.parsePrimitive(value.jsonPrimitive, paramType)
-            }
-
-            val toolResponse = tool.invoke(parsedParams.values.toTypedArray())
-            if (toolResponse != null) {
-                messages.add(GroqCtx.Message(role = "tool", content = "$toolResponse", toolCallId = toolCallId, name = toolName))
-
-                println("[Tool $toolName ($toolCallId) response]: $toolResponse")
-                send()
-            } else {
-                println("[Tool $toolName ($toolCallId) returned null response]")
-            }
+            send(output)
         }
     }
 
@@ -142,10 +189,10 @@ class GroqDriver(val model: GroqModel, val toolChoice: String, val maxCompletion
         return tools.entries.firstOrNull { it.value.function.name == toolName }?.key
     }
 
-    override fun query(query: String) {
+    override fun query(query: String, output: OutputBundler) {
         val userMessage = GroqCtx.Message(role = "user", content = query)
         messages.add(userMessage)
 
-        send()
+        send(output)
     }
 }
