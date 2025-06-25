@@ -13,18 +13,22 @@ fun main() {
     val getWeatherTool = ToolLinker.generateTool(::getWeather)
     val reverseStringTool = ToolLinker.generateTool(::reverseString)
 
-    val ai = GroqDriver.Builder().model(GroqModel.DEEPSEEK_LLAMA_70B)
-        .systemMessage("You are a helpful assistant. Avoid calling the same tool repeatedly with inputs that undo prior operations. After tool calls, provide a final, concise answer. ")
+    val ai = GroqDriver.Builder().model(GroqModel.QWEN_QWEN3_32B)
+        .systemMessage("Once you have what you need, dont call anymore tools/functions and answer the user.")
         .apiKey(System.getenv("GROQ_API_KEY") ?: throw IllegalStateException("GROQ_API_KEY environment variable is not set"))
         .withTool(getWeatherTool)
         .withTool(reverseStringTool)
         .build()
 
-    ai.query("Reverse 'Hello' and then the result again. Use your tools on every reversal for this job.")
+    var currentQuery: String
+    while (true) {
+        currentQuery = readLine() ?: break
+        ai.query(currentQuery)
+    }
 
 }
 
-@Tool("get_weather", "Get the general current weather for a location")
+@Tool("get_weather", "Get the general current weather for a location, returns the temperature")
 fun getWeather(
     @Param("location", ParamTypes.STRING, "the location to inquire about very general") location: String,
     @Param("unit", ParamTypes.STRING, "the unit for the result") @ParamEnum("fahrenheit", "celsius") @ParamDefault("fahrenheit") unit: String
@@ -32,9 +36,9 @@ fun getWeather(
     return "The current weather in $location is 75 degrees $unit."
 }
 
-@Tool("reverse_string", "reverse a string")
+@Tool("reverse_string", "Use this tool to reverse a string, returns the reversed string.")
 fun reverseString(
-    @Param("input", ParamTypes.STRING, "The string to reverse") input: String
+    @Param("input", ParamTypes.STRING, "Put the string to reverse in this parameter.") input: String
 ): String {
     return input.reversed()
 }

@@ -129,8 +129,6 @@ class GroqDriver(val model: GroqModel, val toolChoice: String, val maxCompletion
             val toolResponse = tool.invoke(parsedParams.values.toTypedArray())
             if (toolResponse != null) {
                 messages.add(GroqCtx.Message(role = "tool", content = "$toolResponse", toolCallId = toolCallId, name = toolName))
-                messages.add(GroqCtx.Message(role = "assistant", content = "Tool executed!"))
-                messages.add(GroqCtx.Message(role = "user", content = "Continue!"))
 
                 println("[Tool $toolName ($toolCallId) response]: $toolResponse")
                 send()
