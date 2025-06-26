@@ -10,6 +10,7 @@ import net.integr.kai.json.JsonHolder
 import net.integr.kai.output.OutputBundler
 import net.integr.kai.tool.ParamTypes
 import net.integr.kai.tool.data.IntermediateTool
+import net.integr.kai.web.HttpConnector
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.net.URI
@@ -17,7 +18,7 @@ import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 
-class GroqDriver(val model: GroqModel, val toolChoice: String, val maxCompletionTokens: Int, systemMessage: String?, intermediateTools: List<IntermediateTool>, val apiKey: String) : ModelDriver {
+class GroqDriver(val model: GroqModel, val toolChoice: String, val maxCompletionTokens: Int, systemMessage: String?, intermediateTools: List<IntermediateTool>, val apiKey: String, val allowRecursiveToolCalls: Boolean) : ModelDriver {
     class Builder {
         private lateinit var model: GroqModel
         private var toolChoice: String = "auto"
@@ -25,11 +26,13 @@ class GroqDriver(val model: GroqModel, val toolChoice: String, val maxCompletion
         private var systemMessage: String? = null
         private var tools: List<IntermediateTool> = emptyList()
         private lateinit var apiKey: String
+        private var allowRecursiveToolCalls: Boolean = false
 
         fun model(model: GroqModel) = apply { this.model = model }
         fun toolChoice(toolChoice: String) = apply { this.toolChoice = toolChoice }
         fun maxCompletionTokens(maxCompletionTokens: Int) = apply { this.maxCompletionTokens = maxCompletionTokens }
         fun systemMessage(systemMessage: String) = apply { this.systemMessage = systemMessage }
+        fun allowRecursiveToolCalls() = apply { allowRecursiveToolCalls = true }
         fun apiKey(apiKey: String) = apply { this.apiKey = apiKey }
         fun withTool(tool: IntermediateTool) = apply {
             tools = if (tools.isEmpty()) {
@@ -39,15 +42,13 @@ class GroqDriver(val model: GroqModel, val toolChoice: String, val maxCompletion
             }
         }
 
-        fun build() = GroqDriver(model, toolChoice, maxCompletionTokens, systemMessage, tools, apiKey)
+        fun build() = GroqDriver(model, toolChoice, maxCompletionTokens, systemMessage, tools, apiKey, allowRecursiveToolCalls)
     }
 
     val url = "https://api.groq.com/openai/v1/chat/completions"
 
     private val messages = mutableListOf<GroqCtx.Message>()
     private val tools = mutableMapOf<IntermediateTool, GroqCtx.Tool>()
-
-    private val httpClient = HttpClient.newHttpClient()
 
     init {
         systemMessage?.let {
@@ -87,14 +88,10 @@ class GroqDriver(val model: GroqModel, val toolChoice: String, val maxCompletion
 
         val json = builtReq.toJson()
 
-        val request = HttpRequest.newBuilder(URI.create(url))
-            .header("Content-Type", "application/json")
-            .header("Authorization", "Bearer $apiKey")
-            .POST(HttpRequest.BodyPublishers.ofString(json))
-            .build()
+        val request = HttpConnector.newJsonRequestWithBearer(url, apiKey, json)
+        val response = HttpConnector.sendAndGetStream(request)
 
-        val response = httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream())
-        val reader = BufferedReader(InputStreamReader(response.body()))
+        val reader = BufferedReader(InputStreamReader(response))
         handleStreamResponse(reader, output)
     }
 
@@ -181,7 +178,7 @@ class GroqDriver(val model: GroqModel, val toolChoice: String, val maxCompletion
         if (finishReason == "tool_calls") {
             messages.addAll(toolCallsResponses.values)
 
-            send(output)
+            send(output, allowRecursiveToolCalls)
         }
     }
 
