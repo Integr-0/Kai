@@ -1,4 +1,4 @@
-package net.integr.kai.driver.impl.groq
+package net.integr.kai.driver.impl.groq.data
 
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
@@ -13,7 +13,8 @@ data class GroqCtx(
     val tools: Collection<Tool> = emptyList(),
     val maxCompletionTokens: Int,
     val toolChoice: String,
-    val stream: Boolean
+    val stream: Boolean,
+    val reasoningEffort: String? = null,
 ) {
     @Serializable
     data class Tool(val type: String, val function: Function) {

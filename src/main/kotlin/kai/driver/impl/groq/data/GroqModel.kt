@@ -1,4 +1,4 @@
-package net.integr.kai.driver.impl.groq
+package net.integr.kai.driver.impl.groq.data
 
 enum class GroqModel(val modelName: String) {
     QWEN_QWQ_32B("qwen-qwq-32b"),
